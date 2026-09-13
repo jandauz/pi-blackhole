@@ -211,12 +211,15 @@ Central OM runtime managing model resolution, consolidation lifecycle, cooldown 
 
 The extension's consolidation agents are loaded via `jiti` with `moduleCache: false`, creating a separate `pi-ai` instance whose `apiProviderRegistry` lacks custom providers registered by other extensions (e.g., `claude-bridge`).
 
-The bridge solves this with two mechanisms:
+The bridge resolves custom streams through the host-composed `modelRegistry.streamSimple` facade when available. For compatibility with older Pi versions, each foreground `agent_start` also refreshes a `Symbol.for("pi-blackhole:provider-streams")` map from the registry's public provider APIs; worker calls fall back to that map if the facade is unavailable.
 
-1. **Wrap `pi.registerProvider`** — Captures `streamSimple` functions at registration time into a `Symbol.for("pi-blackhole:provider-streams")` global Map. Handles providers registered after pi-blackhole's factory runs.
-2. **`agent_start` scan** — On first agent start, scans `modelRegistry.registeredProviders` for providers that registered before pi-blackhole loaded. Uses `hasScannedFallback` flag to run once.
+The `createBridgeStreamFn()` in [[src/om/provider-stream.ts]] lets jiti-loaded agents access these custom providers without depending on their private pi-ai registry.
 
-The `createBridgeStreamFn()` in [[src/om/provider-stream.ts]] lets jiti-loaded agents access these custom providers without going through pi-ai's registry.
+Each worker agent additionally wraps that stream through [[src/om/worker-provider.ts]]. One UUID identifies one agent-loop attempt and is attached to every provider call in `sessionId` plus a versioned `pi.worker.*` metadata envelope. The envelope includes stage, idle timeout, and originating session/branch-leaf metadata, but only the run UUID controls provider conversation ownership. `finish()` is idempotent and calls `Symbol.for("pi-provider-worker-lifecycle-v1")` when a compatible provider exposes it, ensuring a parked multi-turn query is released on success, failure, cancellation, timeout, or turn-cap exit. The wrapper adds this envelope only for the `claude-bridge` provider; every other provider receives its original options unchanged.
+
+Worker records are transactional at the agent-loop boundary: a provider error/abort or a turn cap reached on a tool-using turn rejects the whole attempt even if an earlier tool call produced valid records. Consolidation therefore cannot append partial observations/reflections/drops and then advance coverage past unprocessed input.
+
+`session_tree` invalidates the runtime generation even when Pi retains the same session id. A late worker result therefore fails the generation check before ledger append or cursor advance; the uncommitted source remains eligible for a later run on the active lineage. Ordinary compaction does not globally cancel workers.
 
 ## Upstream lineage
 

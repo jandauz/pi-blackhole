@@ -85,6 +85,44 @@ describe("lazy worker imports", () => {
     expect(f.runtime.consolidationInFlight).toBe(false);
   });
 
+  it("invalidates in-flight worker ownership on branch navigation", async () => {
+    const { registerConsolidationTrigger } = await import("../src/om/consolidation.js");
+    const f = fixture();
+    registerConsolidationTrigger(f.pi, f.runtime);
+    f.handlers.get("session_start")!({}, f.ctx);
+    const generation = f.runtime.captureGeneration("lazy-workers");
+
+    f.handlers.get("session_tree")!({ newLeafId: "branch-leaf-b" }, f.ctx);
+
+    expect(generation.signal.aborted).toBe(true);
+    expect(f.runtime.isGenerationActive(generation)).toBe(false);
+    expect(f.runtime.captureGeneration("lazy-workers").branchIdentity).toBe("branch-leaf-b");
+    expect(imports).toEqual([]);
+  });
+
+  it("captures the actual launch-time branch leaf after normal turns append", async () => {
+    const { registerConsolidationTrigger } = await import("../src/om/consolidation.js");
+    const f = fixture();
+    f.runtime.config.memory = true;
+    f.runtime.config.reflectAfterTokens = 1_000_000;
+    registerConsolidationTrigger(f.pi, f.runtime);
+    f.handlers.get("session_start")!({}, f.ctx);
+    f.entries.push({
+      type: "message",
+      id: "m2",
+      message: { role: "user", content: "newer source text ".repeat(100) },
+    });
+
+    f.handlers.get("agent_start")!({}, f.ctx);
+    await f.runtime.consolidationPromise;
+
+    expect(runObserver).toHaveBeenCalled();
+    expect(runObserver.mock.calls[0][0].workerLineage).toEqual({
+      parentSessionId: "lazy-workers",
+      parentBranchId: "m2",
+    });
+  });
+
   it("does not import a worker when no model can run it", async () => {
     const { runConsolidationPipeline } = await import("../src/om/consolidation.js");
     const f = fixture();

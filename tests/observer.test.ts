@@ -13,6 +13,7 @@ import {
   runObserver,
 } from "../src/om/agents/observer/agent.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
+import { WORKER_LIFECYCLE_SYMBOL, WORKER_METADATA } from "../src/om/worker-provider.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -63,6 +64,45 @@ describe("runObserver", () => {
     });
 
     expect(providerFetch).toBeTypeOf("function");
+  });
+
+  it("forwards one worker identity through all provider calls and closes the run", async () => {
+    const providerOptions: any[] = [];
+    const finished: string[] = [];
+    (globalThis as Record<symbol, unknown>)[WORKER_LIFECYCLE_SYMBOL] = {
+      finishRun: (runId: string) => finished.push(runId),
+    };
+    const providerStream = (_model: any, _context: any, options: any) => {
+      providerOptions.push(options);
+      return {};
+    };
+    const loop = ((_prompts: any[], _context: any, config: any, _signal: any, streamFn: any) => ({
+      async *[Symbol.asyncIterator]() {},
+      result: async () => {
+        streamFn(config.model, {}, { metadata: { existing: "kept" } });
+        streamFn(config.model, {}, {});
+        return {};
+      },
+    })) as any;
+
+    try {
+      await runObserver({
+        ...baseArgs,
+        model: { provider: "claude-bridge" } as any,
+        agentLoop: loop,
+        streamFn: providerStream,
+        workerLineage: { parentSessionId: "session-a", parentBranchId: "entry-a" },
+      });
+    } finally {
+      delete (globalThis as Record<symbol, unknown>)[WORKER_LIFECYCLE_SYMBOL];
+    }
+
+    expect(providerOptions).toHaveLength(2);
+    expect(providerOptions[0].sessionId).toBe(providerOptions[1].sessionId);
+    expect(providerOptions[0].metadata.existing).toBe("kept");
+    expect(providerOptions[0].metadata[WORKER_METADATA.parentSessionId]).toBe("session-a");
+    expect(providerOptions[0].metadata[WORKER_METADATA.parentBranchId]).toBe("entry-a");
+    expect(finished).toEqual([providerOptions[0].sessionId]);
   });
 
   it("keeps core observer prompt rules", async () => {
@@ -249,9 +289,56 @@ describe("runObserver", () => {
 
     await runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
 
+    const completedTurn = { message: { content: [{ type: "text", text: "done" }] } };
     expect(shouldStopAfterTurn).toBeTypeOf("function");
-    expect(shouldStopAfterTurn({})).toBe(false);
-    expect(shouldStopAfterTurn({})).toBe(true);
+    expect(shouldStopAfterTurn(completedTurn)).toBe(false);
+    expect(shouldStopAfterTurn(completedTurn)).toBe(true);
+  });
+
+  it("rejects partial observations when a later provider turn fails", async () => {
+    const loop = ((_prompts: any[], context: any) => ({
+      async *[Symbol.asyncIterator]() {
+        await context.tools[0].execute("tool-1", {
+          observations: [
+            {
+              content: "Partial observation",
+              relevance: "high",
+              sourceEntryIds: ["entry-a"],
+            },
+          ],
+        });
+        yield {
+          type: "agent_end",
+          messages: [{ stopReason: "error", errorMessage: "continuation failed" }],
+        };
+      },
+      result: async () => ({}),
+    })) as any;
+
+    await expect(runObserver({ ...baseArgs, agentLoop: loop })).rejects.toThrow(
+      "Observer API error: continuation failed",
+    );
+  });
+
+  it("rejects partial observations when the turn cap interrupts a tool continuation", async () => {
+    const loop = fakeAgentLoop(async (_prompts, context, config) => {
+      await context.tools[0].execute("tool-1", {
+        observations: [
+          {
+            content: "Partial observation",
+            relevance: "high",
+            sourceEntryIds: ["entry-a"],
+          },
+        ],
+      });
+      config.shouldStopAfterTurn({
+        message: { content: [{ type: "toolCall", id: "tool-1", name: "record_observations" }] },
+      });
+    });
+
+    await expect(runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 1 })).rejects.toThrow(
+      "Observer reached its turn limit before completing",
+    );
   });
 
   it("uses configured observer thinking level for reasoning models", async () => {

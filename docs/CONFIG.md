@@ -532,6 +532,30 @@ Each model config supports the following fields:
 }
 ```
 
+### Claude bridge workers
+
+With a compatible `pi-claude-bridge`, each observer, reflector, and dropper agent loop supplies a unique UUID in `sessionId` plus versioned `pi.worker.*` metadata. The identity is stable across every provider call and tool-result continuation in that loop. Parent session and branch-leaf ids are diagnostic/validity metadata only; they are never used to resume the foreground Claude conversation. A lifecycle hook releases a provider query if the worker exits at its turn cap, throws, is cancelled, or exceeds its idle timeout. Non-bridge providers receive the original options unchanged and retain their existing behavior.
+
+Initial manual validation example using model ids registered by `pi-claude-bridge` 0.7.0:
+
+```json
+{
+  "compaction": "manual",
+  "memory": true,
+  "sessionFallback": false,
+  "debugLog": true,
+  "providerIdleTimeoutMs": 300000,
+  "observerModel": { "provider": "claude-bridge", "id": "claude-sonnet-4-6", "thinking": "low" },
+  "reflectorModel": { "provider": "claude-bridge", "id": "claude-sonnet-4-6", "thinking": "low" },
+  "dropperModel": { "provider": "claude-bridge", "id": "claude-sonnet-4-6", "thinking": "low" },
+  "observerFallbackModels": [],
+  "reflectorFallbackModels": [],
+  "dropperFallbackModels": []
+}
+```
+
+Merge these keys into the existing config rather than replacing unrelated settings. Before a live run, verify the selected model is present in `/model`, Claude Code is using the intended subscription credential source, and paid extra usage is disabled (or an explicit spend limit is accepted). Blackhole never adds an automatic paid-provider fallback; `sessionFallback: false` also prevents fallback to the foreground model.
+
 ## Debug Section
 
 ### `debug` / `debugLog`

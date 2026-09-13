@@ -27,6 +27,7 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
+import { createWorkerProviderRun, type WorkerLineage } from "../../worker-provider.js";
 
 interface RunObserverArgs {
   model: Model<any>;
@@ -58,6 +59,8 @@ interface RunObserverArgs {
    * OpenCode `x-opencode-session`) without per-provider branching upstream.
    */
   sessionId?: string;
+  /** Originating Pi lineage for diagnostics and stale-result ownership. */
+  workerLineage?: WorkerLineage;
 }
 
 const RelevanceSchema = Type.Union([
@@ -265,6 +268,7 @@ ${conversation}`;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
   let turnCount = 0;
+  let turnLimitInterrupted = false;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption = {
     model,
@@ -279,9 +283,15 @@ ${conversation}`;
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
     ...(effectiveMaxTurns !== undefined
       ? {
-          shouldStopAfterTurn: () => {
+          shouldStopAfterTurn: (turn) => {
             turnCount++;
-            return turnCount >= effectiveMaxTurns;
+            const reachedLimit = turnCount >= effectiveMaxTurns;
+            if (reachedLimit) {
+              turnLimitInterrupted = turn.message.content.some(
+                (block) => block.type === "toolCall",
+              );
+            }
+            return reachedLimit;
           },
         }
       : {}),
@@ -294,26 +304,39 @@ ${conversation}`;
   // other extensions (e.g., claude-bridge). The bridge looks up streamSimple functions
   // via modelRegistry (host-composed facade → registered provider config → global map).
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = args.streamFn ?? bridgeStreamFn;
-  const stream = loop(prompts, context, config, signal, streamFn);
+  const workerRun = createWorkerProviderRun(
+    "observer",
+    args.streamFn ?? bridgeStreamFn,
+    args.workerLineage,
+    undefined,
+    args.providerIdleTimeoutMs,
+  );
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Drain events; the tool's execute already collects records.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
+  try {
+    const stream = loop(prompts, context, config, signal, workerRun.streamFn);
+    for await (const event of stream) {
+      // Drain events; the tool's execute already collects records.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.stopReason === "error" || lastMsg?.stopReason === "aborted") {
+          agentError = lastMsg.errorMessage ?? `Agent ${lastMsg.stopReason}`;
+        }
       }
     }
+    await stream.result();
+  } finally {
+    workerRun.finish();
   }
-  await stream.result();
 
-  if (agentError && accumulated.size === 0) {
+  if (agentError) {
     throw new Error(`Observer API error: ${agentError}`);
+  }
+  if (turnLimitInterrupted) {
+    throw new Error("Observer reached its turn limit before completing");
   }
 
   if (accumulated.size === 0) {

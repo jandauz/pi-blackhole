@@ -66,7 +66,21 @@ describe("Runtime generation lifecycle", () => {
     expect(runtime.isGenerationActive(genB)).toBe(true);
   });
 
-  test("R6: dispose increments generation, aborts signal, and invalidates all captures", () => {
+  test("R6: branch navigation invalidates work even when the session id is unchanged", () => {
+    const runtime = new Runtime("/tmp");
+    runtime.startSession("session-a");
+    const beforeNavigation = runtime.captureGeneration("session-a");
+
+    runtime.invalidateLineage("session-a");
+
+    expect(beforeNavigation.signal.aborted).toBe(true);
+    expect(runtime.isGenerationActive(beforeNavigation)).toBe(false);
+    const afterNavigation = runtime.captureGeneration("session-a");
+    expect(afterNavigation.generation).toBe(1);
+    expect(runtime.isGenerationActive(afterNavigation)).toBe(true);
+  });
+
+  test("R7: dispose increments generation, aborts signal, and invalidates all captures", () => {
     const runtime = new Runtime("/tmp");
     const genA = runtime.captureGeneration("session-a");
 
@@ -77,20 +91,20 @@ describe("Runtime generation lifecycle", () => {
     expect(runtime.isGenerationActive(runtime.captureGeneration("session-a"))).toBe(false);
   });
 
-  test("R7: dispose is idempotent — calling twice is safe", () => {
+  test("R8: dispose is idempotent — calling twice is safe", () => {
     const runtime = new Runtime("/tmp");
     runtime.dispose();
     expect(() => runtime.dispose()).not.toThrow();
   });
 
-  test("R8: startSession after dispose is a no-op", () => {
+  test("R9: startSession after dispose is a no-op", () => {
     const runtime = new Runtime("/tmp");
     runtime.dispose();
     expect(() => runtime.startSession("session-b")).not.toThrow();
     expect(runtime.isGenerationActive(runtime.captureGeneration("session-b"))).toBe(false);
   });
 
-  test("R9: multiple session changes each increment generation", () => {
+  test("R10: multiple session changes each increment generation", () => {
     const runtime = new Runtime("/tmp");
     // First startSession establishes the base identity (no increment)
     runtime.startSession("s0");

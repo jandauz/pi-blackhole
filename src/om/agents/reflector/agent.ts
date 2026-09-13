@@ -32,6 +32,7 @@ import {
   type Reflection,
 } from "../../ledger/index.js";
 import type { ReflectionCoverageTier } from "../dropper/coverage.js";
+import { createWorkerProviderRun, type WorkerLineage } from "../../worker-provider.js";
 
 interface RunReflectorArgs {
   model: Model<any>;
@@ -62,6 +63,8 @@ interface RunReflectorArgs {
    * OpenCode `x-opencode-session`) without per-provider branching upstream.
    */
   sessionId?: string;
+  /** Originating Pi lineage for diagnostics and stale-result ownership. */
+  workerLineage?: WorkerLineage;
 }
 
 const RecordReflectionsSchema = Type.Object({
@@ -183,6 +186,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
   let turnCount = 0;
+  let turnLimitInterrupted = false;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption = {
     model,
@@ -196,31 +200,54 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
     ...(effectiveMaxTurns !== undefined
-      ? { shouldStopAfterTurn: () => ++turnCount >= effectiveMaxTurns }
+      ? {
+          shouldStopAfterTurn: (turn) => {
+            const reachedLimit = ++turnCount >= effectiveMaxTurns;
+            if (reachedLimit) {
+              turnLimitInterrupted = turn.message.content.some(
+                (block) => block.type === "toolCall",
+              );
+            }
+            return reachedLimit;
+          },
+        }
       : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;
   // ── Bridge stream function ──
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = args.streamFn ?? bridgeStreamFn;
-  const stream = loop(prompts, context, config, signal, streamFn);
+  const workerRun = createWorkerProviderRun(
+    "reflector",
+    args.streamFn ?? bridgeStreamFn,
+    args.workerLineage,
+    undefined,
+    args.providerIdleTimeoutMs,
+  );
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Tool execution collects records.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
+  try {
+    const stream = loop(prompts, context, config, signal, workerRun.streamFn);
+    for await (const event of stream) {
+      // Tool execution collects records.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.stopReason === "error" || lastMsg?.stopReason === "aborted") {
+          agentError = lastMsg.errorMessage ?? `Agent ${lastMsg.stopReason}`;
+        }
       }
     }
+    await stream.result();
+  } finally {
+    workerRun.finish();
   }
-  await stream.result();
-  if (agentError && accumulated.size === 0) throw new Error(`Reflector API error: ${agentError}`);
+  if (agentError) throw new Error(`Reflector API error: ${agentError}`);
+  if (turnLimitInterrupted) {
+    throw new Error("Reflector reached its turn limit before completing");
+  }
   return accumulated.size > 0 ? Array.from(accumulated.values()) : undefined;
 }
 

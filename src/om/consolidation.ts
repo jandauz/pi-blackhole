@@ -425,9 +425,29 @@ function currentSessionIdentity(ctx: ConsolidationCtx): string | undefined {
   return ctx.sessionManager.getSessionId?.();
 }
 
+function currentBranchIdentity(ctx: ConsolidationCtx): string | undefined {
+  const branch = ctx.sessionManager.getBranch?.();
+  if (!Array.isArray(branch)) return undefined;
+  const id = (branch[branch.length - 1] as { id?: unknown } | undefined)?.id;
+  return typeof id === "string" ? id : undefined;
+}
+
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
   pi.on("session_start", (_event, ctx) => {
-    runtime.startSession(currentSessionIdentity(ctx as ConsolidationCtx));
+    const consolidationCtx = ctx as ConsolidationCtx;
+    runtime.startSession(
+      currentSessionIdentity(consolidationCtx),
+      currentBranchIdentity(consolidationCtx),
+    );
+  });
+  pi.on("session_tree", (event, ctx) => {
+    const consolidationCtx = ctx as ConsolidationCtx;
+    runtime.invalidateLineage(
+      currentSessionIdentity(consolidationCtx),
+      typeof event.newLeafId === "string"
+        ? event.newLeafId
+        : currentBranchIdentity(consolidationCtx),
+    );
   });
   pi.on("session_shutdown", () => {
     runtime.dispose();
@@ -536,7 +556,10 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 
   // Capture the generation at launch time so we can detect session changes
   // mid-pipeline and abort stale work.
-  const generation = runtime.captureGeneration(currentSessionIdentity(ctx));
+  const generation = runtime.captureGeneration(
+    currentSessionIdentity(ctx),
+    currentBranchIdentity(ctx),
+  );
   if (!runtime.isGenerationActive(generation)) return;
 
   const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
@@ -833,6 +856,10 @@ export async function runObserverStage(
         signal: generation.signal,
         modelRegistry: ctx.modelRegistry,
         sessionId,
+        workerLineage: {
+          parentSessionId: generation.sessionIdentity,
+          parentBranchId: generation.branchIdentity,
+        },
       });
       if (!runtime.isGenerationActive(generation)) return "abort";
 
@@ -1131,6 +1158,10 @@ async function runReflectorStage(
         signal: generation.signal,
         modelRegistry: ctx.modelRegistry,
         sessionId,
+        workerLineage: {
+          parentSessionId: generation.sessionIdentity,
+          parentBranchId: generation.branchIdentity,
+        },
       });
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
@@ -1385,6 +1416,10 @@ async function runDropperStage(
         signal: generation.signal,
         modelRegistry: ctx.modelRegistry,
         sessionId,
+        workerLineage: {
+          parentSessionId: generation.sessionIdentity,
+          parentBranchId: generation.branchIdentity,
+        },
       });
       if (!runtime.isGenerationActive(generation)) return "abort";
       const latestReflectionCoverageId = isManualMode(runtime.config)

@@ -44,6 +44,7 @@ export type ConsolidationPhase = "observer" | "reflector" | "dropper";
 export interface RuntimeGeneration {
   readonly generation: number;
   readonly sessionIdentity: string | undefined;
+  readonly branchIdentity: string | undefined;
   readonly signal: AbortSignal;
 }
 
@@ -213,6 +214,7 @@ export class Runtime {
   // ── Session generation lifecycle (PR #58: stale-runtime append protection) ──
   private generation = 0;
   private sessionIdentity: string | undefined;
+  private branchIdentity: string | undefined;
   private disposed = false;
   private lifecycleController = new AbortController();
   private compactionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -223,16 +225,30 @@ export class Runtime {
    * deferred compaction timer.  The old extension's deferred work is thereby
    * invalidated.
    */
-  startSession(sessionIdentity: string | undefined): void {
+  startSession(sessionIdentity: string | undefined, branchIdentity?: string): void {
     if (this.disposed) return;
     if (this.sessionIdentity !== undefined && this.sessionIdentity !== sessionIdentity) {
-      this.lifecycleController.abort();
-      this.lifecycleController = new AbortController();
-      this.generation += 1;
-      this.clearCompactionTimer();
-      this.compactInFlight = false;
+      this.invalidateLineage(sessionIdentity, branchIdentity);
+      return;
     }
     this.sessionIdentity = sessionIdentity;
+    this.branchIdentity = branchIdentity;
+  }
+
+  /**
+   * Invalidate deferred work after a branch/tree navigation even when Pi keeps
+   * the same session id. Results from the old lineage are discarded before any
+   * ledger append or cursor advance, leaving the source work retryable.
+   */
+  invalidateLineage(sessionIdentity: string | undefined, branchIdentity?: string): void {
+    if (this.disposed) return;
+    this.lifecycleController.abort();
+    this.lifecycleController = new AbortController();
+    this.generation += 1;
+    this.clearCompactionTimer();
+    this.compactInFlight = false;
+    this.sessionIdentity = sessionIdentity;
+    this.branchIdentity = branchIdentity;
   }
 
   /**
@@ -240,10 +256,14 @@ export class Runtime {
    * The returned RuntimeGeneration carries a generation number,
    * session identity, and an AbortSignal that fires on session change.
    */
-  captureGeneration(sessionIdentity: string | undefined): RuntimeGeneration {
+  captureGeneration(
+    sessionIdentity: string | undefined,
+    branchIdentity: string | undefined = this.branchIdentity,
+  ): RuntimeGeneration {
     return {
       generation: this.generation,
       sessionIdentity,
+      branchIdentity,
       signal: this.lifecycleController.signal,
     };
   }

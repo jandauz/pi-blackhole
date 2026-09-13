@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- **Claude bridge memory workers now carry explicit run ownership.** Every observer, reflector, and dropper agent-loop attempt gets a unique UUID that is preserved in provider options across tool continuations, along with stage, idle-timeout, and parent-lineage metadata. The compatible Claude bridge can isolate prompts, tools, sessions, cancellation, and cleanup, while non-bridge providers receive unchanged options. An idempotent lifecycle signal releases parked queries; idle watchdogs reap stalled SDK workers; provider errors, aborts, and tool-turn caps reject partial records; and branch navigation invalidates in-flight results before ledger append or cursor advancement.
+
 ---
 
 ## [0.5.5] - 2026-09-15
