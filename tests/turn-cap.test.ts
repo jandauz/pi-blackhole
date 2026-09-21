@@ -36,6 +36,16 @@ describe("createTurnCap", () => {
     expect(createTurnCap(1).finishTurn(completedTurn)).toEqual({ action: "end" });
   });
 
+  it.each([0, -1, Number.NaN, 1.5])("rejects an invalid turn cap (%s)", (maxTurns) => {
+    expect(() => createTurnCap(maxTurns)).toThrow(RangeError);
+  });
+
+  it("names the offending value when it rejects a turn cap", () => {
+    expect(() => createTurnCap(0)).toThrow(
+      "createTurnCap requires a positive integer turn cap, got 0",
+    );
+  });
+
   it("leaves an error response undecided on the finishTurn hook", () => {
     expect(createTurnCap(1).finishTurn(errorTurn)).toBeUndefined();
   });

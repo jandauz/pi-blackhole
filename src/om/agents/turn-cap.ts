@@ -35,8 +35,22 @@ export interface TurnCap {
   finishTurn: (context: TurnCapContext) => AgentTurnDecision | undefined;
 }
 
-/** Turn cap a loop spreads into its `AgentLoopConfig` when `maxTurns` is configured. */
+/**
+ * Turn cap a loop spreads into its `AgentLoopConfig` when `maxTurns` is configured.
+ *
+ * @param maxTurns Completed turns allowed before the cap ends the run. Must be a
+ *   positive integer: `0`/`-1` would end the run on its first turn and `NaN`
+ *   would disable the cap entirely, so callers omit the cap instead of passing
+ *   a non-positive value. Resolved config already guarantees the contract
+ *   (`positiveInt` normalization of `agentMaxTurns`), so this only fires on a
+ *   programming error.
+ * @throws {RangeError} When `maxTurns` is not a positive integer.
+ */
 export function createTurnCap(maxTurns: number): TurnCap {
+  if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+    throw new RangeError(`createTurnCap requires a positive integer turn cap, got ${maxTurns}`);
+  }
+
   let legacyTurns = 0;
   let finishTurns = 0;
 
