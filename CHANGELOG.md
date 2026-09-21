@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- **`agentMaxTurns` is enforced on Pi 0.87.** The observer, reflector, and dropper capped their loops with `shouldStopAfterTurn`, which 0.87 removed in favour of `finishTurn` (whose `{ action: "end" }` ends the run), so the configured turn budget was silently ignored and a worker could keep running until it stopped naturally, errored, or was aborted. Both hooks are now emitted through `createTurnCap` with independent counters, so the loaded generation picks the one it knows and a host calling both still ends at `maxTurns`; a turn that already hard-exited (`error`/`aborted`) neither decides the run nor spends budget ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83)).
+
 ---
 
 ## [0.5.7] - 2026-09-21

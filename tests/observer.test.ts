@@ -242,7 +242,7 @@ describe("runObserver", () => {
     expect(result.observations).toBeUndefined();
   });
 
-  it("uses maxTurns as an observer turn cap", async () => {
+  it("caps observer turns through the 0.86 shouldStopAfterTurn hook", async () => {
     let shouldStopAfterTurn: any;
     const loop = fakeAgentLoop((_prompts, _context, config) => {
       shouldStopAfterTurn = config.shouldStopAfterTurn;
@@ -250,9 +250,21 @@ describe("runObserver", () => {
 
     await runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
 
-    expect(shouldStopAfterTurn).toBeTypeOf("function");
-    expect(shouldStopAfterTurn({})).toBe(false);
-    expect(shouldStopAfterTurn({})).toBe(true);
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(false);
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(true);
+  });
+
+  it("caps observer turns through the 0.87 finishTurn hook", async () => {
+    let finishTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      finishTurn = config.finishTurn;
+    });
+
+    await runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(finishTurn).toBeTypeOf("function");
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toEqual({ action: "end" });
   });
 
   it("uses configured observer thinking level for reasoning models", async () => {
