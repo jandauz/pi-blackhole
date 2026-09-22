@@ -297,6 +297,7 @@ rm -rf ~/.pi/agent/pi-blackhole
 | ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------- |
 | **[`README.md`](README.md)**                                 | You, now          | Install, commands, the pitch, the value, the demo.                                        |
 | **[`CHANGELOG.md`](CHANGELOG.md)**                           | You               | Every release, what changed, who contributed.                                             |
+| **[`CONTRIBUTING.md`](CONTRIBUTING.md)**                     | You, if helping   | Branch model, dev setup, PR description format, docs/changelog gates.                     |
 | **[`docs/CONFIG.md`](docs/CONFIG.md)**                       | You, when tuning  | Every config key with type, default, behavior, and env-var overrides.                     |
 | **[`llms.txt`](llms.txt)**                                   | Your agent        | Step-by-step guided setup interview, anti-patterns, exact file paths, internal constants. |
 | **[`docs/MIGRATION-GUIDE.md`](docs/MIGRATION-GUIDE.md)**     | You, if upgrading | Old → new config key mapping, semantic changes, automatic migration behavior.             |
