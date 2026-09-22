@@ -54,6 +54,7 @@ import {
   latestCoverageIndex,
   latestCoverageMarkerId,
   observationsCreatedAfterIndex,
+  observationPoolTokens,
   observationToSummaryLine,
   rawTokensAfterIndex,
   rawTokensSinceDropCoverage,
@@ -246,22 +247,8 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
     observerDue || reflectorDue
       ? false
       : (() => {
-          // Compute active observation pool tokens (branch + pending in manual mode)
-          const folded = foldLedger(entries);
-          let poolTokens = folded.activeObservations.reduce(
-            (s: number, o: Observation) => s + (o.tokenCount ?? 0),
-            0,
-          );
-          // In manual mode, include pending observation batches
-          if (pending) {
-            const pendingBatches = pending.observationBatches ?? [];
-            for (const batch of pendingBatches) {
-              poolTokens += ((batch.data as any)?.observations ?? []).reduce(
-                (s: number, o: any) => s + (o.tokenCount ?? 0),
-                0,
-              );
-            }
-          }
+          // Live active pool, plus pending observation batches in manual mode.
+          const poolTokens = observationPoolTokens(entries, pending).tokens;
           const fullnessVsPool =
             config.observationsPoolMaxTokens > 0
               ? poolTokens / config.observationsPoolMaxTokens

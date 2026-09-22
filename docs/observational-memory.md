@@ -40,7 +40,7 @@ Prunes low-value observations from active memory when the pool exceeds `observat
 
 Each worker runs an `agentLoop` driven by a system prompt and a single record/drop tool. This section documents the three contracts — objective, inputs, tool schema, validation, edge cases, and shared loop mechanics.
 
-All three workers share the same loop configuration: `toolExecution: "sequential"`, `thinkingLevel: "low"` (default), `maxTurns` capped by the config's `agentMaxTurns` (default 16) via a `shouldStopAfterTurn` counter, and `maxTokens` bounded by `boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS)` where [[src/om/model-budget.ts]] `AGENT_LOOP_MAX_TOKENS = 32_000`. Record identity is a content hash (`hashId` in [[src/om/ids.ts]]), so identical content is deduplicated within and across calls.
+All three workers share the same loop configuration: `toolExecution: "sequential"`, `thinkingLevel: "low"` (default), `maxTurns` capped by the config's `agentMaxTurns` (default 16) through `createTurnCap` in [[src/om/agents/turn-cap.ts]], which emits both Pi's `shouldStopAfterTurn` (0.85/0.86) and `finishTurn` (0.87+) hooks so either generation enforces the same budget, and `maxTokens` bounded by `boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS)` where [[src/om/model-budget.ts]] `AGENT_LOOP_MAX_TOKENS = 32_000`. Record identity is a content hash (`hashId` in [[src/om/ids.ts]]), so identical content is deduplicated within and across calls.
 
 ### Observer contract
 

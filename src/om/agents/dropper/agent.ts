@@ -8,6 +8,7 @@
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { buildAgentContext } from "../agent-context.js";
+import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -209,6 +210,10 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   } = args;
   if (observations.length === 0) return undefined;
 
+  // Delta-scoped, not the live pool: `observations` is the post-last-drop delta
+  // handed to runDropper, so this measures the candidate set, not the whole
+  // active pool (observationPoolTokens). Widening the scope here would change
+  // which observations the dropper can drop.
   const observationTokens = observations.reduce(
     (sum, observation) => sum + observation.tokenCount,
     0,
@@ -346,9 +351,8 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  const config: AgentLoopConfig & ProviderFetchOption = {
+  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
     apiKey,
     headers,
@@ -359,9 +363,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined
-      ? { shouldStopAfterTurn: () => ++turnCount >= effectiveMaxTurns }
-      : {}),
+    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;
