@@ -9,6 +9,7 @@
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { buildAgentContext } from "../agent-context.js";
+import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -256,9 +257,8 @@ ${conversation}`;
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  const config: AgentLoopConfig & ProviderFetchOption = {
+  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
     apiKey,
     headers,
@@ -269,14 +269,7 @@ ${conversation}`;
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined
-      ? {
-          shouldStopAfterTurn: () => {
-            turnCount++;
-            return turnCount >= effectiveMaxTurns;
-          },
-        }
-      : {}),
+    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;

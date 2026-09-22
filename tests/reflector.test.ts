@@ -40,6 +40,31 @@ describe("V3 reflector agent", () => {
     observations: [obsA, obsB],
   };
 
+  it("caps reflector turns through the 0.86 shouldStopAfterTurn hook", async () => {
+    let shouldStopAfterTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      shouldStopAfterTurn = config.shouldStopAfterTurn;
+    });
+
+    await runReflector({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(false);
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(true);
+  });
+
+  it("caps reflector turns through the 0.87 finishTurn hook", async () => {
+    let finishTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      finishTurn = config.finishTurn;
+    });
+
+    await runReflector({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(finishTurn).toBeTypeOf("function");
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toEqual({ action: "end" });
+  });
+
   it("keeps core reflector prompt guidance in V3 terms", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {

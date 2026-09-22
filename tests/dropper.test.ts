@@ -44,6 +44,31 @@ describe("V3 dropper agent", () => {
     budgetTokens: 20,
   };
 
+  it("caps dropper turns through the 0.86 shouldStopAfterTurn hook", async () => {
+    let shouldStopAfterTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      shouldStopAfterTurn = config.shouldStopAfterTurn;
+    });
+
+    await runDropper({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(false);
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(true);
+  });
+
+  it("caps dropper turns through the 0.87 finishTurn hook", async () => {
+    let finishTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      finishTurn = config.finishTurn;
+    });
+
+    await runDropper({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(finishTurn).toBeTypeOf("function");
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toEqual({ action: "end" });
+  });
+
   it("computes observation pool fullness defensively", () => {
     expect(observationPoolFullness(0, 100)).toBe(0);
     expect(observationPoolFullness(-1, 100)).toBe(0);

@@ -4,6 +4,11 @@
 
 - **Pi loads the prebuilt `dist/index.js`.** `pi.extensions` now points at the tsup bundle instead of `./index.ts`, removing jiti transpilation of the whole module graph on startup (measured import 500 to 570 ms down to 350 to 530 ms, factory time unchanged). Registry installs ship `dist/` in the tarball. Git installs need `npmCommand` set so devDependencies install and `prepare` builds `dist/`; when they don't, `scripts/prepare.mjs` now warns that the extension will not load instead of failing silently, documented next to the GitHub install command in `README.md`.
 
+### Fixed
+
+- **`agentMaxTurns` is enforced on Pi 0.87.** The observer, reflector, and dropper capped their loops with `shouldStopAfterTurn`, which 0.87 removed in favour of `finishTurn` (whose `{ action: "end" }` ends the run), so the configured turn budget was silently ignored and a worker could keep running until it stopped naturally, errored, or was aborted. Both hooks are now emitted through `createTurnCap` with independent counters, so the loaded generation picks the one it knows and a host calling both still ends at `maxTurns`; a turn that already hard-exited (`error`/`aborted`) neither decides the run nor spends budget ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83)).
+- **Custom-provider streams keep their receiver when the bridge dispatches them.** Each `streamSimple` handler was stored in the global capture map detached from its provider config, and the api-only fallback for host-aliased provider ids extracted it the same way. A class-based config that reads instance state therefore threw `Cannot read properties of undefined`: the capture-map path crashed the worker stream, while the aliased path swallowed the error and silently degraded to the compat dispatcher. Captured handlers are now bound to their config, and the api-only match is invoked on it ([upstream OM `#80`](https://github.com/elpapi42/pi-observational-memory/pull/80)).
+
 ---
 
 ## [0.5.7] - 2026-09-21
