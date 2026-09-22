@@ -210,6 +210,10 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   } = args;
   if (observations.length === 0) return undefined;
 
+  // Delta-scoped, not the live pool: `observations` is the post-last-drop delta
+  // handed to runDropper, so this measures the candidate set, not the whole
+  // active pool (observationPoolTokens). Widening the scope here would change
+  // which observations the dropper can drop.
   const observationTokens = observations.reduce(
     (sum, observation) => sum + observation.tokenCount,
     0,

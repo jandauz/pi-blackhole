@@ -2,6 +2,8 @@
 
 ### Changed
 
+- **Observation-pool measurement is centralized.** The dropper trigger, `/blackhole-memory` pool lines, and footer P gauge each summed the active pool with their own inline copy; they now share `observationPoolTokens()` (`ledger/progress.ts`), which sums the live active pool plus — always explicitly — manual-mode pending observation batches. `/blackhole-memory` now includes those pending batches in its `Obs pool` / `Dropper:` percentages (so a manual-only user sees the same pool the trigger gates on) and labels the split (`· branch 0 + pending 1,400`); the footer P gauge deliberately stays branch-only. No trigger, threshold, or dropper-candidate behavior changes ([#120](https://github.com/k0valik/pi-blackhole/issues/120)).
+
 - **Pi loads the prebuilt `dist/index.js`.** `pi.extensions` now points at the tsup bundle instead of `./index.ts`, removing jiti transpilation of the whole module graph on startup (measured import 500 to 570 ms down to 350 to 530 ms, factory time unchanged). Registry installs ship `dist/` in the tarball. Git installs need `npmCommand` set so devDependencies install and `prepare` builds `dist/`; when they don't, `scripts/prepare.mjs` now warns that the extension will not load instead of failing silently, documented next to the GitHub install command in `README.md`.
 
 ### Fixed
