@@ -12,7 +12,10 @@
 # From npm (recommended)
 pi install npm:pi-blackhole
 
-# Or directly from GitHub
+# Or directly from GitHub.
+# Requires npmCommand to be set in settings.json, otherwise pi runs
+# `npm install --omit=dev`, devDependencies are skipped, and dist/ is not built.
+# Example: "npmCommand": ["npm"] in ~/.pi/agent/settings.json
 pi install git:github.com/k0valik/pi-blackhole
 ```
 

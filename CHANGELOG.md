@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- **Pi loads the prebuilt `dist/index.js`.** `pi.extensions` now points at the tsup bundle instead of `./index.ts`, removing jiti transpilation of the whole module graph on startup (measured import 500 to 570 ms down to 350 to 530 ms, factory time unchanged). Registry installs ship `dist/` in the tarball. Git installs need `npmCommand` set so devDependencies install and `prepare` builds `dist/`; when they don't, `scripts/prepare.mjs` now warns that the extension will not load instead of failing silently, documented next to the GitHub install command in `README.md`.
+
 ---
 
 ## [0.5.7] - 2026-09-21
