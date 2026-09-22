@@ -34,14 +34,15 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## ✨ What's new
 
-> **Latest release: [0.5.7](CHANGELOG.md)**
+> **Latest release: [0.5.8](CHANGELOG.md)**
 >
-> - **Pi 0.87 is supported** — inline compaction, the observer/reflector/dropper system prompts, and auto-compaction all work on `0.87.0`. The compact-shape guard follows 0.87's `_refreshFinalizedContext()` helper, the memory workers build whichever prompt carrier the loaded host reads, and `@earendil-works/*` moves to `0.87.0` with the dependabot hold removed. ([#117](https://github.com/k0valik/pi-blackhole/issues/117), [#118](https://github.com/k0valik/pi-blackhole/issues/118))
-> - **Live footer status bar** — `O` (transcript since the last observer run), `P` (observation pool fill) and `X` (context since the last compaction) gauges with color thresholds, plus worker spinners and compaction notes carrying their trigger reason. Config `statusBar`, default on. Remove the standalone `blackhole-status.ts` extension if you ran it: two writers race on the same status key. ([#113](https://github.com/k0valik/pi-blackhole/pull/113))
-> - **Inline compaction finds Pi's bundled host behind the 0.86 `createRequire` launcher** — the adapter follows the same-package bootstrap file without executing it, so it patches the `AgentSession` the host actually runs instead of the unused modular class, which fell back to settled compaction. ([#116](https://github.com/k0valik/pi-blackhole/pull/116))
-> - **Observer prompts are capped in every compaction mode** — `observerPreambleMaxTokens` now applies in `auto`/`off` too and covers reflections (newest first), and the pre-flight context guard prices the rendered preamble plus system prompt, so an oversized prompt skips the model cleanly instead of failing every attempt with a provider 400.
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
+> - **Pi loads a prebuilt bundle** — `pi.extensions` points at the tsup `dist/index.js` instead of TypeScript source, cutting startup import time (500–570 ms → 350–530 ms). Registry installs ship `dist/`; git installs need `npmCommand` set, and a missing `dist/` now warns instead of failing silently.
+> - **Every observation-pool readout agrees** — the dropper trigger, `/blackhole-memory` pool lines, and the footer P gauge each summed the pool inline; they now share one helper, and `/blackhole-memory` includes (and labels) manual-mode pending batches so the display matches what the trigger gates on. No threshold or candidate behavior changes. ([#120](https://github.com/k0valik/pi-blackhole/issues/120))
+> - **`agentMaxTurns` is enforced on Pi 0.87** — the worker loops emitted only the removed `shouldStopAfterTurn`, so the turn budget was silently ignored; `createTurnCap` now emits both that hook and 0.87's `finishTurn`, with independent counters. ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83))
+> - **Extension registration survives class-based hosts** — hooks were invoked detached from their API object, which threw on hosts like oh-my-pi; handlers are now bound before registration. ([#124](https://github.com/k0valik/pi-blackhole/pull/124))
+> - **Custom-provider streams keep their receiver** — captured `streamSimple` handlers are bound to their config, so class-based providers no longer crash or silently fall back to the compat dispatcher. ([upstream OM `#80`](https://github.com/elpapi42/pi-observational-memory/pull/80))
+>
+> See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ---
 

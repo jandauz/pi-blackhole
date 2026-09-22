@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [0.5.8] - 2026-09-22
+
 ### Changed
 
 - **Observation-pool measurement is centralized.** The dropper trigger, `/blackhole-memory` pool lines, and footer P gauge each summed the active pool with their own inline copy; they now share `observationPoolTokens()` (`ledger/progress.ts`), which sums the live active pool plus — always explicitly — manual-mode pending observation batches. `/blackhole-memory` now includes those pending batches in its `Obs pool` / `Dropper:` percentages (so a manual-only user sees the same pool the trigger gates on) and labels the split (`· branch 0 + pending 1,400`); the footer P gauge deliberately stays branch-only. No trigger, threshold, or dropper-candidate behavior changes ([#120](https://github.com/k0valik/pi-blackhole/issues/120)).
