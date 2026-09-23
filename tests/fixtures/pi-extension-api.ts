@@ -1,4 +1,15 @@
-import { createEventBus, type ExtensionAPI, type ExtensionEvent, type ExtensionHandler, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
+import {
+  createEventBus,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type ExtensionEvent,
+  type TurnEndEvent,
+} from "@earendil-works/pi-coding-agent";
+
+// Capture/replay retains the exact argument contract but does not interpret the
+// callback return, so it remains opaque. The returned ExtensionAPI keeps public
+// registration subject to the host's specific constraints.
+type TurnEndHandler = (event: TurnEndEvent, ctx: ExtensionContext) => unknown;
 
 /**
  * Host-interface double for extension wiring tests.
@@ -9,7 +20,7 @@ import { createEventBus, type ExtensionAPI, type ExtensionEvent, type ExtensionH
  * reached, so unexpected host usage fails loudly instead of silently passing.
  */
 export interface ExtensionApiDoubleOptions {
-  turnEndHandlers?: ExtensionHandler<TurnEndEvent>[];
+  turnEndHandlers?: TurnEndHandler[];
   appendEntry?: (customType: string, data: unknown) => unknown;
 }
 
@@ -22,11 +33,14 @@ function notImplemented(member: keyof ExtensionAPI): () => never {
 export function createExtensionApiDouble(options: ExtensionApiDoubleOptions = {}): ExtensionAPI {
   return {
     on(...[event, handler]:
-      | [event: "turn_end", handler: ExtensionHandler<TurnEndEvent>]
+      | [event: "turn_end", handler: TurnEndHandler]
       | [event: Exclude<ExtensionEvent["type"], "turn_end">, handler: (...args: never[]) => unknown]
-    ) {
+    ): () => void {
       // Other events are registered but never replayed by these fixtures.
       if (event === "turn_end") options.turnEndHandlers?.push(handler);
+      // Pi 0.87's `on()` returns an unsubscribe function; the double captures
+      // handlers for replay and has nothing to detach.
+      return () => {};
     },
     appendEntry(customType: string, data: unknown) {
       options.appendEntry?.(customType, data);

@@ -11,12 +11,14 @@ import { scaffoldSettings } from "./src/core/settings";
 import { registerBeforeCompactHook } from "./src/hooks/before-compact";
 import { registerCompactFailedHook } from "./src/hooks/compact-failed.js";
 import { registerCompactionContextHook } from "./src/hooks/compaction-context.js";
+import { registerPreCompactionOutput } from "./src/hooks/cosmetic-output.js";
 import { registerPiVccCommand } from "./src/commands/pi-vcc";
 import { registerMemoryCommand } from "./src/commands/memory";
 import { registerVccRecallCommand } from "./src/commands/vcc-recall";
 import { registerBlackholeExportCommand } from "./src/commands/blackhole-export";
 import { registerConsolidationTrigger } from "./src/om/consolidation.js";
 import { registerCompactionTrigger } from "./src/om/compaction-trigger.js";
+import { registerStatusBar } from "./src/om/status-bar.js";
 import { registerRecallTool } from "./src/tools/recall";
 import { Runtime } from "./src/om/runtime.js";
 import { captureRegisteredProviderStreams } from "./src/om/provider-stream.js";
@@ -75,11 +77,13 @@ export default async (pi: ExtensionAPI) => {
   // Observational memory: background consolidation pipeline
   registerConsolidationTrigger(pi, omRuntime); // agent_start + turn_end → observer/reflector/dropper
   registerCompactionTrigger(pi, omRuntime); // turn_end + agent_end → auto-compaction
+  registerStatusBar(pi, omRuntime); // footer gauges (O/P/X) + worker events (config.statusBar)
 
   // Pi-vcc: compaction + om injection
   registerBeforeCompactHook(pi, omRuntime); // session_before_compact → pi-vcc + om content
   registerCompactFailedHook(pi, omRuntime); // session_compact_failed → failure visibility + compactInFlight guard (pi >= 0.84.3)
   registerCompactionContextHook(pi, omRuntime); // context → immutable append segment projection
+  registerPreCompactionOutput(pi, omRuntime); // session_compact → display-only copy of dropped output
 
   // Commands
   registerPiVccCommand(pi, omRuntime); // /pi-vcc (needs runtime for noAutoCompact flush)

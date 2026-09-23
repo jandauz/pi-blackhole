@@ -21,7 +21,9 @@ import {
   isStaleExtensionContextError,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
+import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
+import { OBSERVER_SYSTEM } from "./agents/observer/prompts.js";
 
 /** Fixed overhead for system prompt, tool definitions, and turn scaffold in context window pre-check. */
 const AGENT_LOOP_RESERVE = 8_000;
@@ -52,6 +54,7 @@ import {
   latestCoverageIndex,
   latestCoverageMarkerId,
   observationsCreatedAfterIndex,
+  observationPoolTokens,
   observationToSummaryLine,
   rawTokensAfterIndex,
   rawTokensSinceDropCoverage,
@@ -60,6 +63,7 @@ import {
   reflectionToSummaryLine,
   reflectionsCreatedAfterIndex,
   selectPriorObservations,
+  selectPriorReflections,
   type Entry,
   type Observation,
   type Reflection,
@@ -98,45 +102,20 @@ function sourceEntriesAfter(entries: Entry[], index: number): Entry[] {
 /**
  * Cap source entries to maxTokens by keeping newest entries first,
  * walking backwards until the token budget is exceeded.
- * Uses a conservative chars/4 heuristic for token estimation.
+ * Reuses estimateEntryTokens (the same estimator rawTokensAfterIndex uses for
+ * the trigger) so the cap and the trigger never drift apart (#110).
  */
-function capSourceEntriesToTokens(entries: Entry[], maxTokens: number): Entry[] {
+export function capSourceEntriesToTokens(entries: Entry[], maxTokens: number): Entry[] {
   let totalTokens = 0;
   const kept: Entry[] = [];
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    let chars = 0;
-    // Tokenize all entry types, not just "message": custom_message and
-    // branch_summary entries also consume observer context window.
-    if (entry.type === "message" && entry.message) {
-      const msg = entry.message as any;
-      if (typeof msg.content === "string") chars = msg.content.length;
-      else if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.text) chars += block.text.length;
-        }
-      }
-    } else if (
-      entry.type === "custom" &&
-      (entry.customType === OM_OBSERVATIONS_RECORDED ||
-        entry.customType === OM_REFLECTIONS_RECORDED ||
-        entry.customType === OM_OBSERVATIONS_DROPPED)
-    ) {
-      // Custom entries carry structured data — estimate from JSON serialization
-      chars = String(JSON.stringify(entry.data ?? {})).length;
-    } else if (entry.summary) {
-      chars = String(entry.summary).length;
-    }
-    const estTokens = Math.ceil(chars / 4);
-    if (totalTokens + estTokens > maxTokens && kept.length > 0) break;
-    // Remove the `kept.length > 0` guard? No — keep the guard but allow
-    // the first entry to be dropped only if it exceeds maxTokens alone.
-    // (The guard against empty kept list prevents dropping the first entry
-    // when later entries are small; but a single oversized entry should
-    // still be included to avoid losing the newest data entirely.)
-    if (totalTokens + estTokens > maxTokens && kept.length === 0) {
-      // First (newest) entry exceeds maxTokens alone — include it anyway
-      // to avoid data loss, but don't add more.
+    const estTokens = estimateEntryTokens(entry);
+    if (totalTokens + estTokens > maxTokens) {
+      // Newest-first walk stops as soon as the budget is exceeded — except
+      // for the newest entry itself: a single oversized entry is still
+      // included (kept.length === 0) so the newest data is never lost.
+      if (kept.length > 0) break;
       kept.unshift(entry);
       break;
     }
@@ -268,22 +247,8 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
     observerDue || reflectorDue
       ? false
       : (() => {
-          // Compute active observation pool tokens (branch + pending in manual mode)
-          const folded = foldLedger(entries);
-          let poolTokens = folded.activeObservations.reduce(
-            (s: number, o: Observation) => s + (o.tokenCount ?? 0),
-            0,
-          );
-          // In manual mode, include pending observation batches
-          if (pending) {
-            const pendingBatches = pending.observationBatches ?? [];
-            for (const batch of pendingBatches) {
-              poolTokens += ((batch.data as any)?.observations ?? []).reduce(
-                (s: number, o: any) => s + (o.tokenCount ?? 0),
-                0,
-              );
-            }
-          }
+          // Live active pool, plus pending observation batches in manual mode.
+          const poolTokens = observationPoolTokens(entries, pending).tokens;
           const fullnessVsPool =
             config.observationsPoolMaxTokens > 0
               ? poolTokens / config.observationsPoolMaxTokens
@@ -734,16 +699,31 @@ export async function runObserverStage(
   } = serializeSourceAddressedBranchEntries(chunkEntries);
   if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
   const chunkTokens = Math.ceil(chunk.length / 4);
+  // Issue #110 follow-up: expose the post-cap size on the normal path (the
+  // exceptional context_window_exceeded path already logs estimatedInput).
+  // capTokens is the exact quantity capSourceEntriesToTokens enforced (the
+  // same estimateEntryTokens the trigger uses), so it can confirm/rule out
+  // the cap bug in a running install.
+  const capTokens = chunkEntries.reduce((s: number, e) => s + estimateEntryTokens(e), 0);
 
   const memory = fullProjection(entries);
-  let priorReflections = memory.reflections.map(reflectionToSummaryLine);
-  let priorObservations = memory.observations.map(observationToSummaryLine);
 
-  // In manual mode, append accumulated batch history to whatever
-  // fullProjection found in the branch (preserving pre-switch markers
-  // when transitioning from autoCompact to manual mode mid-session).
   // The preamble is capped via observerPreambleMaxTokens so accumulated
-  // observations don't grow unbounded across turns.
+  // memory doesn't grow unbounded across turns. Each section gets up to the
+  // full budget: observations relevance-ranked, reflections newest-first.
+  // In manual mode, append accumulated batch history to whatever
+  // fullProjection found in the branch (preserving pre-switch markers when
+  // transitioning from autoCompact to manual mode mid-session).
+  const preambleMaxTokens =
+    runtime.config.observerPreambleMaxTokens > 0
+      ? runtime.config.observerPreambleMaxTokens
+      : Math.round(runtime.config.observerChunkMaxTokens * 0.3);
+  let priorReflections = selectPriorReflections(memory.reflections, preambleMaxTokens).map(
+    reflectionToSummaryLine,
+  );
+  let priorObservations = selectPriorObservations(memory.observations, preambleMaxTokens).map(
+    observationToSummaryLine,
+  );
   if (isManualMode(runtime.config)) {
     const pendingCtx = readPendingState(sessionId);
     const accumulatedReflections = (pendingCtx.reflectionBatches ?? []).flatMap(
@@ -753,22 +733,25 @@ export async function runObserverStage(
       (b) => (b.data as any).observations ?? [],
     );
 
-    // Capped preamble: high always kept, medium/low scored by relevance + recency
-    const preambleMaxTokens =
-      runtime.config.observerPreambleMaxTokens > 0
-        ? runtime.config.observerPreambleMaxTokens
-        : Math.round(runtime.config.observerChunkMaxTokens * 0.3);
     const allObservations = [...memory.observations, ...accumulatedObservations];
     priorObservations = selectPriorObservations(allObservations, preambleMaxTokens).map(
       observationToSummaryLine,
     );
 
-    // Reflections are never trimmed — rare and always kept
-    priorReflections = [
-      ...priorReflections,
-      ...accumulatedReflections.map(reflectionToSummaryLine),
-    ];
+    const allReflections = [...memory.reflections, ...accumulatedReflections];
+    priorReflections = selectPriorReflections(allReflections, preambleMaxTokens).map(
+      reflectionToSummaryLine,
+    );
   }
+
+  // Attempt-invariant prompt overhead, measured once: the rendered preamble
+  // plus the observer system prompt. The per-model context guard below must
+  // price the real prompt — a chunk-only estimate goes blind once accumulated
+  // memory grows and every attempt 400s instead of skipping cleanly.
+  const preambleTokens = estimateStringTokens(
+    [...priorReflections, ...priorObservations].join("\n"),
+  );
+  const observerSystemTokens = estimateStringTokens(OBSERVER_SYSTEM);
 
   // If manual mode: skip if this exact chunk was already processed
   if (isManualMode(runtime.config) && isObservationChunkPending(sessionId, coversUpToId)) {
@@ -796,6 +779,10 @@ export async function runObserverStage(
     );
     debugLog("observer.start", {
       tokens,
+      maxChunkTokens,
+      chunkTokens,
+      capTokens,
+      preambleTokens,
       coversUpToId,
       sourceEntryIds,
       sourceEntryCount: sourceEntryIds.length,
@@ -813,13 +800,20 @@ export async function runObserverStage(
       stageFallbacks: stageFallbackModels(runtime, "observer"),
     });
 
-    // Check if estimated input fits in model's context window
-    // Use actual chunk tokens (already computed) instead of the configured cap
+    // Check if the full estimated prompt fits in the model's context window:
+    // chunk + rendered preamble + system prompt, plus the agent-loop reserve
+    // for tool definitions and turn scaffold. (The reserve also names the
+    // system prompt, so this slightly over-counts — safe direction for a
+    // pre-flight guard.)
     const effectiveObsCtx = effectiveContextWindow(resolved.model as any, stageModelForThinking);
-    const observerEstimatedInput = chunkTokens + AGENT_LOOP_RESERVE;
+    const observerEstimatedInput =
+      chunkTokens + preambleTokens + observerSystemTokens + AGENT_LOOP_RESERVE;
     if (observerEstimatedInput > effectiveObsCtx) {
       debugLog("observer.context_window_exceeded", {
         estimatedInput: observerEstimatedInput,
+        chunkTokens,
+        preambleTokens,
+        systemTokens: observerSystemTokens,
         effectiveCtx: effectiveObsCtx,
         model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
       });

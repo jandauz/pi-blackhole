@@ -2,7 +2,7 @@
 
 pi-blackhole merges deterministic algorithmic compaction with session-surviving observational memory into one Pi extension. VCC handles compaction; OM handles the memory layer.
 
-The entry point is `index.ts` (default export factory registered via `pi.extensions`).
+The entry point is `index.ts` (default export factory registered via `pi.extensions`). This fork loads `./index.ts` from `package.json` directly; upstream's `main` and build output point to `./dist/index.js`, but the Pi extension entry remains local source pending separate dist activation.
 
 ## Startup loading
 
@@ -27,7 +27,7 @@ The core insight: Pi's native LLM compaction erodes detail after repeated cycles
 
 Five architectural pillars define the extension:
 
-1. **Deterministic compaction** — The [[vcc-compaction#compile pipeline]] extracts structured sections (goals, files, commits, preferences, brief transcript) using regex heuristics. No LLM, no hallucination, no API cost.
+1. **Deterministic compaction** — The [[vcc-compaction#compile pipeline]] extracts structured sections (goals, files, commits, preferences, brief transcript) using regex heuristics. No LLM, no hallucination, no API cost. Trigger paths (settled + mid-run) and their history: [[mid-run-compaction]].
 2. **Observational memory** — Three [[observational-memory#The three workers|background workers]] (Observer, Reflector, Dropper) capture timestamped observations and durable reflections in a session ledger that persists across compactions.
 3. **Unified configuration** — One JSON file (`~/.pi/agent/pi-blackhole/pi-blackhole-config.json`) replaces two upstream configs. See [[config#Unified configuration]].
 4. **Per-worker model fallback** — Each OM worker has a primary model and ordered fallback list with persisted cooldowns. See [[observational-memory#Model resolution]].
@@ -211,9 +211,7 @@ Central OM runtime managing model resolution, consolidation lifecycle, cooldown 
 
 The extension's consolidation agents are loaded via `jiti` with `moduleCache: false`, creating a separate `pi-ai` instance whose `apiProviderRegistry` lacks custom providers registered by other extensions (e.g., `claude-bridge`).
 
-The bridge resolves custom streams through the host-composed `modelRegistry.streamSimple` facade when available. For compatibility with older Pi versions, each foreground `agent_start` also refreshes a `Symbol.for("pi-blackhole:provider-streams")` map from the registry's public provider APIs; worker calls fall back to that map if the facade is unavailable.
-
-The `createBridgeStreamFn()` in [[src/om/provider-stream.ts]] lets jiti-loaded agents access these custom providers without depending on their private pi-ai registry.
+`createBridgeStreamFn()` in [[src/om/provider-stream.ts]] first uses the host-composed `modelRegistry.streamSimple` facade when available. Otherwise it checks the registry's public `getRegisteredProviderIds` / `getRegisteredProviderConfig` APIs (matching the model's provider and API first, then an API alias), then a `Symbol.for("pi-blackhole:provider-streams")` cache, and finally pi-ai compat. Captured cache handlers are bound to their provider config so class-based providers retain their receiver. The cache is refreshed from registered provider APIs at `agent_start`; it does not require access to jiti's private pi-ai registry.
 
 Each worker agent additionally wraps that stream through [[src/om/worker-provider.ts]]. One UUID identifies one agent-loop attempt and is attached to every provider call in `sessionId` plus a versioned `pi.worker.*` metadata envelope. The envelope includes stage, idle timeout, and originating session/branch-leaf metadata, but only the run UUID controls provider conversation ownership. `finish()` is idempotent and calls `Symbol.for("pi-provider-worker-lifecycle-v1")` when a compatible provider exposes it, ensuring a parked multi-turn query is released on success, failure, cancellation, timeout, or turn-cap exit. The wrapper adds this envelope only for the `claude-bridge` provider; every other provider receives its original options unchanged.
 

@@ -6,6 +6,63 @@
 
 ---
 
+## [0.5.8] - 2026-09-22
+
+### Changed
+
+- **Observation-pool measurement is centralized.** The dropper trigger, `/blackhole-memory` pool lines, and footer P gauge each summed the active pool with their own inline copy; they now share `observationPoolTokens()` (`ledger/progress.ts`), which sums the live active pool plus — always explicitly — manual-mode pending observation batches. `/blackhole-memory` now includes those pending batches in its `Obs pool` / `Dropper:` percentages (so a manual-only user sees the same pool the trigger gates on) and labels the split (`· branch 0 + pending 1,400`); the footer P gauge deliberately stays branch-only. No trigger, threshold, or dropper-candidate behavior changes ([#120](https://github.com/k0valik/pi-blackhole/issues/120)).
+
+- **Pi loads the prebuilt `dist/index.js`.** `pi.extensions` now points at the tsup bundle instead of `./index.ts`, removing jiti transpilation of the whole module graph on startup (measured import 500 to 570 ms down to 350 to 530 ms, factory time unchanged). Registry installs ship `dist/` in the tarball. Git installs need `npmCommand` set so devDependencies install and `prepare` builds `dist/`; when they don't, `scripts/prepare.mjs` now warns that the extension will not load instead of failing silently, documented next to the GitHub install command in `README.md`.
+
+### Fixed
+
+- **`agentMaxTurns` is enforced on Pi 0.87.** The observer, reflector, and dropper capped their loops with `shouldStopAfterTurn`, which 0.87 removed in favour of `finishTurn` (whose `{ action: "end" }` ends the run), so the configured turn budget was silently ignored and a worker could keep running until it stopped naturally, errored, or was aborted. Both hooks are now emitted through `createTurnCap` with independent counters, so the loaded generation picks the one it knows and a host calling both still ends at `maxTurns`; a turn that already hard-exited (`error`/`aborted`) neither decides the run nor spends budget ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83)).
+- **Extension registration survives class-based `ExtensionAPI` hosts.** `registerCompactFailedHook` widened and then invoked `pi.on` detached, so a host whose `on` reads instance state (e.g. oh-my-pi's `ConcreteExtensionAPI`) threw `TypeError: undefined is not an object (evaluating 'this.extension')` during registration and took the rest of the extension's hooks down with it; the handler is now bound to `pi` before the widening cast, a no-op on pi's closure-based API ([#124](https://github.com/k0valik/pi-blackhole/pull/124)).
+- **Custom-provider streams keep their receiver when the bridge dispatches them.** Each `streamSimple` handler was stored in the global capture map detached from its provider config, and the api-only fallback for host-aliased provider ids extracted it the same way. A class-based config that reads instance state therefore threw `Cannot read properties of undefined`: the capture-map path crashed the worker stream, while the aliased path swallowed the error and silently degraded to the compat dispatcher. Captured handlers are now bound to their config, and the api-only match is invoked on it ([upstream OM `#80`](https://github.com/elpapi42/pi-observational-memory/pull/80)).
+
+---
+
+## [0.5.7] - 2026-09-21
+
+### Added
+
+- **Footer status bar.** pi-blackhole now shows live state in the pi footer (config key `statusBar`, default on; env `PI_BLACKHOLE_STATUSBAR`): three token gauges — O (transcript since the last observer run), P (observation pool fill), X (context since the last compaction) — plus worker spinners, `✓ +N` completion events, and compaction notes with their trigger reason. Gauges color by fill: dim under 80%, theme warning color from 80%, theme error color at 100%. The bar reads in-process state (`runtime.config`, `model-budget.ts`, `ledger/progress.ts`, `runtime.consolidationPhase`), so its numbers match `/blackhole-memory` status; it adds no file polling and no threshold guessing, only a 1-second in-process poll of the runtime state. If you ran the standalone `blackhole-status.ts` footer extension before, remove it: two writers on the same `setStatus` key race.
+
+### Changed
+
+- **Pi 0.87 is supported.** The `@earendil-works/*` devDependencies move to `0.87.0` in lockstep and the dependabot `>=0.87.0` hold is removed ([#118](https://github.com/k0valik/pi-blackhole/issues/118)). `peerDependencies` (`>=0.85.1 <1.0.0`) is unchanged: the observational-memory system-prompt carrier is probed at runtime, so consolidation keeps its prompt on 0.85/0.86 (legacy `AgentContext.systemPrompt`) and 0.87+ (leading transcript system message) — see Fixed.
+- **CI runs on pull requests targeting `dev` too.** `ci.yml` previously triggered only for `pull_request → main`, so PRs merged into the working branch were gated by bot reviews alone. The full gate (build → typecheck → lint → test → format:check) now covers both branches.
+- **Installs work under pnpm's built-in minimum-release-age policy.** pnpm 11 enforces a 24-hour minimum release age by default, which rejected the brand-new `@earendil-works/*@0.87.0` set. The toolchain pin moves to `pnpm@11.27.1` and those versions are listed in `minimumReleaseAgeExclude` (the previous pin, `11.2.2`, ignored that list), so `pnpm install --frozen-lockfile`, CI, and git-based extension installs no longer wait out the window.
+
+### Fixed
+
+- **The compact-shape guard follows Pi 0.87's `_refreshFinalizedContext()` indirection.** 0.87 moved the `agent.state.messages` repoint out of `AgentSession.compact()` into a helper, so the guard that requires the write _inside_ `compact()` rejected the class and mid-run inline compaction failed closed on 0.87 ([#117](https://github.com/k0valik/pi-blackhole/issues/117)). The guard now accepts an assignment found one call level deep in one of the class's own prototype methods, and still rejects inherited helpers, deeper indirection, and a helper that only reads the property.
+- **Observational-memory consolidation keeps its system prompt on Pi 0.87.** 0.87 removed `AgentContext.systemPrompt` and now carries the prompt as a leading transcript `system` message, so the observer, reflector, and dropper would have silently run without their prompts. They now build whichever carrier the loaded host reads — probed by the presence of Pi 0.87's `createInitialSystemMessage` helper, not a version allowlist — so 0.85/0.86 keep the legacy field and 0.87+ gets the transcript message ([#118](https://github.com/k0valik/pi-blackhole/issues/118)).
+- **Discover Pi 0.86's bundled host behind its `createRequire` launcher.** Follow the same-package bootstrap file without executing it before locating the runtime chunk, so inline compaction captures the active `AgentSession` instead of patching the unused modular class and falling back to settled compaction. A bootstrap target that is missing, unreadable, or outside the Pi package now leaves the launcher's own source in place, so the direct-import scan still runs instead of being skipped.
+- **Observer preamble cap now applies in auto/off compaction modes.** `observerPreambleMaxTokens` was previously only enforced in manual mode, so auto-mode observer prompts could grow without bound even though the main session prompt stayed capped by `observationsPoolMaxTokens`; the observer now applies the same relevance-ranked selection budget in all modes, defaulting to 30% of `observerChunkMaxTokens` when unset.
+- **Observer preamble cap now covers reflections, and the context guard prices the full prompt.** Reflections were never trimmed (no drop entry type exists for them), leaving a permanently growing floor on the observer preamble; each preamble section is now capped at `observerPreambleMaxTokens` (reflections newest-first). The pre-flight `observer.context_window_exceeded` guard previously measured only `chunkTokens + 8000`, so oversized prompts sailed through and failed every attempt with a provider 400; it now accounts for the rendered preamble and the observer system prompt, skipping the model cleanly instead.
+
+---
+
+## [0.5.6] - 2026-09-19
+
+### Added
+
+- **Pre-compaction output stays visible after compaction** ([#103](https://github.com/k0valik/pi-blackhole/pull/103), thanks @sonSunnoi). After a successful Blackhole compaction, the newest assistant text removed from view is re-rendered as a display-only **Previous output — display only** block, so recent work stays readable without opening `/tree`. Bounded and opt-out: 16 KiB UTF-8 cap with a truncation marker, text only (no tool output, thinking, or images), idempotent per compaction, skipped when the newest dropped text is retained; disabled via `showPreCompactionMessage` (default `true`, env `PI_BLACKHOLE_SHOW_PRE_COMPACTION_MESSAGE`).
+
+### Changed
+
+- **Minimum supported Pi raised to 0.85.1; compat-floor CI retired.** The `compat-min-supported` job re-pinned the `@earendil-works/*` peers to the `peerDependencies` floor and typechecked against them, going red every time. The extension now builds against the pinned devDependencies (0.85.1) and the peer floor is set to match; `peerDependencies` remains the single source of truth for the declared minimum.
+
+### Fixed
+
+- **Observer chunk cap now counts every entry type** ([#110](https://github.com/k0valik/pi-blackhole/issues/110)). `capSourceEntriesToTokens` used a hand-rolled type table that had drifted from the trigger's estimator, so `custom_message` entries (text lives in `.content`, not `.summary`) counted as zero tokens and an oversized chunk could exceed `maxTokens`; it now reuses the same `estimateEntryTokens` the trigger uses (CJK-aware), and debug logging exposes the post-cap chunk size and cooldown-skipped models on the normal path.
+- **CJK-aware token accounting, text primitives, and extractor language handling** ([#106](https://github.com/k0valik/pi-blackhole/issues/106), [#105](https://github.com/k0valik/pi-blackhole/issues/105)). Script detection is automatic — no new config keys. `estimateStringTokens` counts CJK scripts as ~1 token/char instead of `ceil(chars/4)`, so every budget built on it (OM `tokenCount`, pool caps, `retainedToolOutputMaxTokens`, worker context pre-check) no longer admits ~3× the configured tokens. Clipping recognizes CJK terminators (`。！？；`, fullwidth included) and pause punctuation instead of hard-cutting space-free text. `recall` word-segments CJK queries via `Intl.Segmenter`, restoring per-term BM25 ranking with script-aware document-length normalization. `[User Preferences]` accepts CJK correction anchors (`不要`/`回退`/`错了`…) and `[Outstanding Context]` CJK failure stems (`失败`/`报错`/`错误`…) with benign-compound guards, scanning the whole fresh window instead of the last 20 blocks.
+- **`[Files And Changes]` and `[Commits]` now extract what actually happened** ([#105](https://github.com/k0valik/pi-blackhole/issues/105)). File attribution correlates tool calls with results (native path args, anchor-based edits, a bash parser for redirects/`sed -i`/`tee`/`cp`/`mv`/`rm`/`curl -o`), sanitizes arg strings so `src/a.ts:10-40` no longer phantoms next to `/repo/src/a.ts`, and adds git grounding tags (`staged`, `new`, `deleted`, …); the collector runs only at compaction time. `[Commits]` uses a quote-aware token parser with a message-recovery chain (segment-scoped `-m`, `-F -` heredocs, the git success line) and precision guards (`--dry-run`, failed commits, non-`git` commands produce nothing).
+- **`[Files And Changes]` display and cross-compaction merge overhauled**. cwd-relative paths, capped counted lists that never shrink after merge, and single-token paths hard-broken by `wrapLongLines` are reassembled; `(#N)` refs on `[Scope change]` and `[Commits]` for `recall` drill-down; session-goal and outstanding-context clips raised to 200.
+
+---
+
 ## [0.5.5] - 2026-09-15
 
 ### Changed

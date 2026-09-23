@@ -5,13 +5,10 @@
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
  * and throws if the API errored without collecting any tool results.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
+import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -177,18 +174,13 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
       timestamp: Date.now(),
     },
   ];
-  const context: AgentContext = {
-    systemPrompt: REFLECTOR_SYSTEM,
-    messages: [],
-    tools: [recordReflections as AgentTool<any>],
-  };
+  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections as AgentTool<any>]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   let turnLimitInterrupted = false;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  const config: AgentLoopConfig & ProviderFetchOption = {
+  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
     apiKey,
     headers,
@@ -200,17 +192,14 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
     ...(effectiveMaxTurns !== undefined
-      ? {
-          shouldStopAfterTurn: (turn) => {
-            const reachedLimit = ++turnCount >= effectiveMaxTurns;
-            if (reachedLimit) {
-              turnLimitInterrupted = turn.message.content.some(
-                (block) => block.type === "toolCall",
-              );
-            }
-            return reachedLimit;
-          },
-        }
+      ? createTurnCap(effectiveMaxTurns, (turn) => {
+          if (
+            turn.message?.content?.some((block) => block.type === "toolCall") ||
+            turn.message?.stopReason === "toolUse"
+          ) {
+            turnLimitInterrupted = true;
+          }
+        })
       : {}),
   };
 

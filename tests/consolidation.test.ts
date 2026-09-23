@@ -6,9 +6,20 @@ import { Runtime } from "../src/om/runtime.js";
 import {
   makeModelResolver,
   runConsolidationPipeline,
+  capSourceEntriesToTokens,
   type ConsolidationCtx,
 } from "../src/om/consolidation.js";
-import { compactionEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
+import {
+  branchSummary,
+  compactionEntry,
+  customMessage,
+  observationsRecordedEntry,
+  rawMessage,
+  reflection,
+  reflectionsRecordedEntry,
+  textCustomMessage,
+  type TestEntry,
+} from "./fixtures/session.js";
 import { createExtensionApiDouble } from "./fixtures/pi-extension-api.js";
 
 /** Cursor round trips write real pending files, so redirect the agent dir. */
@@ -21,6 +32,8 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 interface ObserverAgentInput {
   chunk: string;
   allowedSourceEntryIds: string[];
+  priorObservations: string[];
+  priorReflections: string[];
 }
 
 const agents = vi.hoisted(() => ({
@@ -1021,5 +1034,253 @@ describe("repeated consolidation pipeline cycles", () => {
     expect(input.chunk).toContain("BIG-1");
     expect(input.allowedSourceEntryIds).toEqual(["m1", "big-1"]);
     expect(restored.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "empty" });
+  });
+});
+
+describe("capSourceEntriesToTokens", () => {
+  test("custom_message with string content contributes tokens (not 0)", () => {
+    // Before the fix, custom_message counted as 0 tokens, so the cap
+    // would keep all of these. After the fix, each custom_message is sized
+    // correctly and the cap drops older ones once the budget is exceeded.
+    const entries = [
+      rawMessage("m0", "x".repeat(200)),
+      textCustomMessage("cm-1", "y".repeat(100)),
+      textCustomMessage("cm-2", "y".repeat(100)),
+      textCustomMessage("cm-3", "y".repeat(100)),
+      textCustomMessage("cm-4", "y".repeat(100)),
+      textCustomMessage("cm-5", "y".repeat(100)),
+    ];
+    const result = capSourceEntriesToTokens(entries, 80);
+    // 5 custom_message entries × ~25 tokens each = 125 tokens. rawMessage ≈ 50 tokens.
+    // Total ≈ 175 > 80. Newest (cm-5) always kept; cm-4 → 50; cm-3 → 75;
+    // cm-2 would push to 100 > 80 and kept.length > 0 → stop.
+    expect(result.map((e) => e.id)).toEqual(["cm-3", "cm-4", "cm-5"]);
+  });
+
+  test("custom_message with array content contributes tokens", () => {
+    const entries = [
+      rawMessage("m0", "x".repeat(200)),
+      customMessage("cm-1", [
+        { type: "text", text: "part one " },
+        { type: "text", text: "part two" },
+      ]),
+      customMessage("cm-2", [
+        { type: "text", text: "part three " },
+        { type: "text", text: "part four" },
+      ]),
+    ];
+    const result = capSourceEntriesToTokens(entries, 8);
+    // Each array custom_message ≈ 5 tokens. rawMessage ≈ 50 tokens.
+    // Budget 8: cm-2 (5) kept; cm-1 would push to 10 > 8 → stop.
+    expect(result.map((e) => e.id)).toEqual(["cm-2"]);
+  });
+
+  test("message entries are still capped correctly", () => {
+    const entries = [
+      rawMessage("old", "ignored old message"),
+      rawMessage("new", "x".repeat(1200)), // ~300 tokens
+    ];
+    const result = capSourceEntriesToTokens(entries, 100);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("new");
+  });
+
+  test("branch_summary entries are still capped correctly", () => {
+    const entries = [
+      rawMessage("old", "ignored old message"),
+      branchSummary("bs-1", "x".repeat(800)), // ~200 tokens
+    ];
+    const result = capSourceEntriesToTokens(entries, 100);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("bs-1");
+  });
+
+  test("cap respects maxTokens across mixed entry types", () => {
+    const entries = [
+      rawMessage("m1", "a".repeat(400)), // ~100 tokens
+      textCustomMessage("cm1", "b".repeat(400)), // ~100 tokens
+      branchSummary("bs1", "c".repeat(400)), // ~100 tokens
+      rawMessage("m2", "d".repeat(400)), // ~100 tokens — newest, should be kept
+    ];
+    // 300 token budget: newest (m2) always kept, then walk backwards
+    const result = capSourceEntriesToTokens(entries, 300);
+    expect(result.map((e) => e.id)).toEqual(["cm1", "bs1", "m2"]);
+  });
+
+  test("oversized newest entry is still included (first-entry guard)", () => {
+    const entries = [
+      rawMessage("old", "ignored"),
+      rawMessage("new", "x".repeat(12_000)), // ~3000 tokens, far exceeds budget
+    ];
+    const result = capSourceEntriesToTokens(entries, 100);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("new");
+  });
+
+  test("blackhole-pre-compaction-output custom entries contribute 0 tokens", () => {
+    // PR #103 cosmetic entries are plain `custom` entries, never `custom_message`.
+    // They must not add to the token budget, even if present in the input.
+    const cosmeticEntry = {
+      type: "custom" as const,
+      id: "cosmetic-1",
+      parentId: null,
+      timestamp: "2026-09-19T16:00:00.000Z",
+      customType: "blackhole-pre-compaction-output",
+      data: {
+        text: "x".repeat(4000),
+        sourceEntryId: "src-1",
+        compactionEntryId: "c1",
+        truncated: true,
+      },
+    };
+    const entries = [
+      rawMessage("old", "y".repeat(200)), // ~50 tokens
+      cosmeticEntry, // 0 tokens
+      rawMessage("new", "x".repeat(200)), // ~50 tokens
+    ];
+    const result = capSourceEntriesToTokens(entries, 50);
+    // cosmeticEntry contributes 0 tokens, so it does not displace the new message.
+    // The cap keeps the newest source entry; older source entries are dropped once
+    // the budget is exceeded.
+    expect(result.map((e) => e.id)).toEqual(["cosmetic-1", "new"]);
+  });
+});
+
+/** The observer preamble cap must apply in auto/off mode, not only manual mode. */
+describe("observer preamble cap", () => {
+  test("caps priorObservations in auto mode via observerPreambleMaxTokens", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 100 });
+    fixture.runtime.config.compaction = "auto";
+    fixture.runtime.config.observerPreambleMaxTokens = 500;
+    fixture.runtime.config.observerChunkMaxTokens = 10_000;
+
+    const observations = Array.from({ length: 20 }, (_, i) => ({
+      id: Math.abs(i).toString(16).padStart(12, "0"),
+      content: `Observation ${i} ` + "x".repeat(200),
+      timestamp: "2026-05-02 10:00",
+      relevance: "medium" as const,
+      sourceEntryIds: ["src-1"],
+      tokenCount: 0,
+    }));
+    fixture.entries.push(rawMessage("src-1", "Source entry " + "y".repeat(100_000)));
+    fixture.entries.push(
+      observationsRecordedEntry("obs-marker", {
+        observations,
+        coversUpToId: "src-1",
+      }),
+    );
+    // Add a second source entry so there is unobserved content after the marker.
+    fixture.entries.push(rawMessage("src-2", "More source " + "z".repeat(100_000)));
+
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    const input = observerChunkArg();
+    // 20 medium observations would exceed the 500-token preamble budget;
+    // the auto-mode cap must trim them down.
+    expect(input.priorObservations.length).toBeLessThan(observations.length);
+    expect(input.priorObservations.length).toBeGreaterThan(0);
+  });
+
+  test("defaults to 30% of observerChunkMaxTokens when observerPreambleMaxTokens is 0", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 100 });
+    fixture.runtime.config.compaction = "auto";
+    fixture.runtime.config.observerPreambleMaxTokens = 0;
+    fixture.runtime.config.observerChunkMaxTokens = 4_000; // 30% = 1200 tokens
+
+    const observations = Array.from({ length: 20 }, (_, i) => ({
+      id: Math.abs(i).toString(16).padStart(12, "0"),
+      content: `Observation ${i} ` + "x".repeat(200),
+      timestamp: "2026-05-02 10:00",
+      relevance: "medium" as const,
+      sourceEntryIds: ["src-1"],
+      tokenCount: 0,
+    }));
+    fixture.entries.push(rawMessage("src-1", "Source entry " + "y".repeat(100_000)));
+    fixture.entries.push(
+      observationsRecordedEntry("obs-marker", {
+        observations,
+        coversUpToId: "src-1",
+      }),
+    );
+    // Add a second source entry so there is unobserved content after the marker.
+    fixture.entries.push(rawMessage("src-2", "More source " + "z".repeat(100_000)));
+
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    const input = observerChunkArg();
+    // With a 1200-token default budget, 20 medium observations (~63 tokens each)
+    // should be capped well below the 20 created.
+    expect(input.priorObservations.length).toBeLessThan(observations.length);
+    expect(input.priorObservations.length).toBeGreaterThan(0);
+  });
+
+  test("caps priorReflections in auto mode via observerPreambleMaxTokens", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 100 });
+    fixture.runtime.config.compaction = "auto";
+    fixture.runtime.config.observerPreambleMaxTokens = 500;
+    fixture.runtime.config.observerChunkMaxTokens = 10_000;
+
+    const reflections = Array.from({ length: 20 }, (_, i) =>
+      reflection((100 + i).toString(16).padStart(12, "0"), ["src-1"], {
+        content: `Reflection ${i} ` + "x".repeat(200),
+      }),
+    );
+    fixture.entries.push(rawMessage("src-1", "Source entry " + "y".repeat(100_000)));
+    fixture.entries.push(
+      reflectionsRecordedEntry("refl-marker", {
+        reflections,
+        coversUpToId: "src-1",
+      }),
+    );
+    // Add a second source entry so there is unobserved content after the marker.
+    fixture.entries.push(rawMessage("src-2", "More source " + "z".repeat(100_000)));
+
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    const input = observerChunkArg();
+    // 20 reflections at ~60 tokens each would exceed the 500-token preamble
+    // budget; the newest-first cap must trim them down without emptying them.
+    expect(input.priorReflections.length).toBeLessThan(reflections.length);
+    expect(input.priorReflections.length).toBeGreaterThan(0);
+  });
+
+  test("skips observer when chunk fits but full prompt with preamble exceeds context window", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 100 });
+    fixture.runtime.config.compaction = "auto";
+    fixture.runtime.config.observerPreambleMaxTokens = 500;
+    fixture.runtime.config.observerChunkMaxTokens = 10_000;
+    // Small model window: chunk (~600 tokens) + 8k reserve fits in 11k, but
+    // adding the preamble (~500 tokens) and the ~3.3k system prompt does not.
+    // The old chunk-only guard would have passed this call through.
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      model: { provider: "test", id: "model", contextWindow: 11_000 },
+      apiKey: "test",
+    });
+
+    const observations = Array.from({ length: 20 }, (_, i) => ({
+      id: Math.abs(i).toString(16).padStart(12, "0"),
+      content: `Observation ${i} ` + "x".repeat(200),
+      timestamp: "2026-05-02 10:00",
+      relevance: "medium" as const,
+      sourceEntryIds: ["src-1"],
+      tokenCount: 0,
+    }));
+    fixture.entries.push(rawMessage("src-1", "Source entry " + "y".repeat(100_000)));
+    fixture.entries.push(
+      observationsRecordedEntry("obs-marker", {
+        observations,
+        coversUpToId: "src-1",
+      }),
+    );
+    // Small follow-up chunk: ~600 tokens, well under the window on its own.
+    fixture.entries.push(rawMessage("src-2", "More source " + "z".repeat(2400)));
+
+    await fixture.run();
+
+    expect(agents.runObserver).not.toHaveBeenCalled();
   });
 });

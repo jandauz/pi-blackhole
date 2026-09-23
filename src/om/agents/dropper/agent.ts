@@ -5,13 +5,10 @@
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
  * and throws if the API errored without collecting any drop candidates.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
+import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -216,6 +213,10 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   } = args;
   if (observations.length === 0) return undefined;
 
+  // Delta-scoped, not the live pool: `observations` is the post-last-drop delta
+  // handed to runDropper, so this measures the candidate set, not the whole
+  // active pool (observationPoolTokens). Widening the scope here would change
+  // which observations the dropper can drop.
   const observationTokens = observations.reduce(
     (sum, observation) => sum + observation.tokenCount,
     0,
@@ -349,18 +350,13 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
       timestamp: Date.now(),
     },
   ];
-  const context: AgentContext = {
-    systemPrompt: DROPPER_SYSTEM,
-    messages: [],
-    tools: [dropObservations as AgentTool<any>],
-  };
+  const context = buildAgentContext(DROPPER_SYSTEM, [dropObservations as AgentTool<any>]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   let turnLimitInterrupted = false;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  const config: AgentLoopConfig & ProviderFetchOption = {
+  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
     apiKey,
     headers,
@@ -372,17 +368,14 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
     ...(effectiveMaxTurns !== undefined
-      ? {
-          shouldStopAfterTurn: (turn) => {
-            const reachedLimit = ++turnCount >= effectiveMaxTurns;
-            if (reachedLimit) {
-              turnLimitInterrupted = turn.message.content.some(
-                (block) => block.type === "toolCall",
-              );
-            }
-            return reachedLimit;
-          },
-        }
+      ? createTurnCap(effectiveMaxTurns, (turn) => {
+          if (
+            turn.message?.content?.some((block) => block.type === "toolCall") ||
+            turn.message?.stopReason === "toolUse"
+          ) {
+            turnLimitInterrupted = true;
+          }
+        })
       : {}),
   };
 

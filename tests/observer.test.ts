@@ -14,6 +14,7 @@ import {
 } from "../src/om/agents/observer/agent.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
 import { WORKER_LIFECYCLE_SYMBOL, WORKER_METADATA } from "../src/om/worker-provider.js";
+import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -108,7 +109,7 @@ describe("runObserver", () => {
   it("keeps core observer prompt rules", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {
-      systemPrompt = context.systemPrompt;
+      systemPrompt = leadingSystemPrompt(context);
     });
 
     await runObserver({ ...baseArgs, agentLoop: loop });
@@ -281,7 +282,7 @@ describe("runObserver", () => {
     expect(result.observations).toBeUndefined();
   });
 
-  it("uses maxTurns as an observer turn cap", async () => {
+  it("caps observer turns through the 0.86 shouldStopAfterTurn hook", async () => {
     let shouldStopAfterTurn: any;
     const loop = fakeAgentLoop((_prompts, _context, config) => {
       shouldStopAfterTurn = config.shouldStopAfterTurn;
@@ -295,16 +296,25 @@ describe("runObserver", () => {
     expect(shouldStopAfterTurn(completedTurn)).toBe(true);
   });
 
+  it("caps observer turns through the 0.87 finishTurn hook", async () => {
+    let finishTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      finishTurn = config.finishTurn;
+    });
+
+    await runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(finishTurn).toBeTypeOf("function");
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toEqual({ action: "end" });
+  });
+
   it("rejects partial observations when a later provider turn fails", async () => {
     const loop = ((_prompts: any[], context: any) => ({
       async *[Symbol.asyncIterator]() {
         await context.tools[0].execute("tool-1", {
           observations: [
-            {
-              content: "Partial observation",
-              relevance: "high",
-              sourceEntryIds: ["entry-a"],
-            },
+            { content: "Partial observation", relevance: "high", sourceEntryIds: ["entry-a"] },
           ],
         });
         yield {
@@ -320,26 +330,28 @@ describe("runObserver", () => {
     );
   });
 
-  it("rejects partial observations when the turn cap interrupts a tool continuation", async () => {
-    const loop = fakeAgentLoop(async (_prompts, context, config) => {
-      await context.tools[0].execute("tool-1", {
-        observations: [
-          {
-            content: "Partial observation",
-            relevance: "high",
-            sourceEntryIds: ["entry-a"],
+  it.each(["shouldStopAfterTurn", "finishTurn"])(
+    "rejects partial observations when %s caps a tool continuation",
+    async (hook) => {
+      const loop = fakeAgentLoop(async (_prompts, context, config) => {
+        await context.tools[0].execute("tool-1", {
+          observations: [
+            { content: "Partial observation", relevance: "high", sourceEntryIds: ["entry-a"] },
+          ],
+        });
+        config[hook]({
+          message: {
+            stopReason: "toolUse",
+            content: [{ type: "toolCall", id: "tool-1", name: "record_observations" }],
           },
-        ],
+        });
       });
-      config.shouldStopAfterTurn({
-        message: { content: [{ type: "toolCall", id: "tool-1", name: "record_observations" }] },
-      });
-    });
 
-    await expect(runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 1 })).rejects.toThrow(
-      "Observer reached its turn limit before completing",
-    );
-  });
+      await expect(runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 1 })).rejects.toThrow(
+        "Observer reached its turn limit before completing",
+      );
+    },
+  );
 
   it("uses configured observer thinking level for reasoning models", async () => {
     let seenReasoning: unknown;
